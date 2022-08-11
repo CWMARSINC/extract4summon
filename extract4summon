@@ -1,0 +1,623 @@
+#!/usr/bin/perl
+# ---------------------------------------------------------------
+# Copyright © 2021,2022 CW MARS, Inc.
+# Jason Stephenson <jstephenson@cwmars.org>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# ---------------------------------------------------------------
+
+use strict;
+use warnings;
+use Getopt::Long qw(:config no_ignore_case no_auto_abbrev);
+use DBI;
+use DBD::Pg qw(:pg_types);
+use MARC::Record;
+use MARC::File::XML (BinaryEncoding => 'utf8', RecordFormat => 'USMARC');
+use YAML::Tiny;
+use IO::File;
+use POSIX qw(strftime);
+use Net::SFTP::Foreign;
+
+=head1 NAME
+
+extract4summon - extract, and send, bibliographic records for Summon
+
+=head1 SYNOPSIS
+
+extract4summon [-U|--user=string] [-h|--host=string]
+[-d|--database=string] [-P|--password=string] [-p|--port=integer]
+[-c|--configuration=file] [-l|--logfile=file]
+[-o|--organization=string] [-n|--dry-run] [-f|--full]
+[-s|--since=date]
+
+=head1 DESCRIPTION
+
+B<extract4summon> extracts bibliographic records from an Evergreen ILS
+database and sends them to the Summon service by Serials Solutions.
+
+=head2 MAIN OPTIONS
+
+=over
+
+=item -c | --configuration
+
+This required option takes an argument of the path to a configuration
+file.  The configuration file is expected to be in YAML format and is
+read by the L<YAML::Tiny> module.  See L<CONFIGURATION> for the layout
+and values in this file.
+
+=item -l | --logfile
+
+Specifies the path to a log file.  The default is C<summon.log>
+relative to the current working directory.
+
+=item -o | --organization
+
+This required option's argument specifies the organization whose
+records are to be dumped.  The value must match one of the
+organization values specified in the configuration file.  See
+L<CONFIGURATION>.
+
+Omitting this option will process each organization listed in the
+given configuration file in turn.  This is useful if you keep all of
+your configuraiton in one file.
+
+=item -f | --full
+
+Extract a full set of records owned by the organization.  This gets
+all of the records that have call numbers attached by the Evergreen
+organizational units listed in the C<orgs> configuration option (see
+L<CONFIGURATION>).  This options is useful for the first run, or if
+you intend to send a complete set of records to refresh the Summon
+database.
+
+In the absence of the C<--full> option, daily update files are
+produced.  These files include a file of new or changed records from
+the past 24 hours, and a file of records that should be deleted
+because the holding for one of the affected C<orgs> have been deleted
+in the past 24 hours.
+
+If this option is not used, for instance in a crontab entry, a full
+update is extracted and sent on the first day of January, April, July,
+and October.  This behavior is not controlled by any options.
+
+=item -s | --since
+
+The C<--since> option allows you to specify a date timestamp in ISO
+format that overrides the default 24 hour period for upate files.  The
+argument to this option can be either a date, i.e. C<2022-08-02>, or a
+date with a time, i.e. C<2022-08-02 16:18:00-04>, that PostgreSQL will
+understand.  When this option is used, B<extract> will gather records
+that have been modified or deleted since the specified date and/or
+datetime.  This option is useful if the program has not been run on a
+daily basis for a while.
+
+The C<--since> and C<--full> options are mutually exclusive.  It is an
+error to specify them both at the same time.
+
+=item -n | --dry-run
+
+Extract the records, but do not send them.  This options prevents the
+upload of the file or files to the Summon server.  This is useful when
+testing or if you want to verify a file before sending it.
+
+=back
+
+=head2 DATABASE OPTIONS
+
+The following command line options are used to specify the PostgreSQL
+database connection:
+
+=over
+
+=item -U | --user
+
+Specifies a string argument specifying the database username to use
+when connecting to the database.  The C<PGUSER> environment variable
+will be used if this option is not set.  See L<ENVIRONMENT>.  The
+default is C<evergreen> if the option is not used.
+
+=item -h | --host
+
+The string argument specifies the host name or IP address of the
+database server.  The C<PGHOST> environment variable will be used if
+this option is not set.  See L<ENVIRONMENT>.  The default is C<db2> if
+the option is not used.
+
+=item -d | --database
+
+Specifies a string argument specifying the name of the database to
+connect to.  The C<PGDATABASE> environment variable will be used if
+this option is not set.  See L<ENVIRONMENT>.  The default is
+C<evergreen> if the option is not used.
+
+=item -p | --port
+
+Specifies the numeric port to use when connecting to PostgreSQL on the
+database host.  The C<PGPORT> environment variable will be used if
+this option is not set.  See L<ENVIRONMENT>.  The default is C<5432>
+if the option is not used.
+
+=item -P | --password
+
+Specifies a string argument specifying the password of the database
+user.  The C<PGPASSWORD> environment variable will be used if this
+option is not set.  See L<ENVIRONMENT>.  The default is C<evergreen>
+if the option is not used.
+
+B<NB:> It is recommended that you B<DO NOT USE> this option.  The
+value can be read by and process that can read your execution
+environment and get the command line of running processes.
+
+=back
+
+=head2 CONFIGURATION
+
+B<extract4summon> is configured using a L<subset of
+YAML|https://metacpan.org/pod/YAML::Tiny#YAML-TINY-SPECIFICATION>
+supported by the L<YAML::Tiny> module.  The configuration variables
+are described below.
+
+=over
+
+=item organization
+
+Takes a string to identify a unique section of configuration.  The
+string must be unique and corresponds to the C<--organization> command
+line option.  The argument of that option is used to find the
+appropriate configuration in a multisection file or must match the
+value of this field in a single configuration file.
+
+=item orgs
+
+Takes a list of actor.org_unit.ids from the database identifying the
+org. units whose records will be exported.  Even if only 1 is used, it
+must be configured as a list.
+
+=item sourceid
+
+A string identifying the organization to Summon.  The value will be
+provided by Serials Solutions and is used in the names of the upload
+files.
+
+=item loc-code
+
+The organization's MARC code.
+
+If you are in the United States, this is assigned by the Library of
+Congress.  The Library of Congress has L<an online
+tool|https://www.loc.gov/marc/organizations/org-search.php> to look it
+up.  If you are in a country other than the United States of America,
+you will need to get this code from your nation's responsible agency.
+
+=item FTP
+
+A set of key/value pairs used to configure the file upload.  Its keys
+and values are described below.
+
+=over
+
+=item host
+
+The SFTP host where files are sent, typically
+C<ftp.summon.serialssolutions.com>.  You will be given this value by
+Serials Solutions.
+
+=item user
+
+The user name used to login to the SFTP server.  You will be given
+this value by Serials Solutions.
+
+=item password
+
+The password for the SFTP server account.  You will be given this
+value by Serials Solutions.
+
+=back
+
+Despite the name of this option being C<FTP>, this program uses SFTP
+to upload files.
+
+=back
+
+=head2 ENVIRONMENT
+
+B<extract4summon> uses the standard PostgreSQL connection environment
+variables.
+
+=over
+
+=item PGUSER
+
+This variable can be used in lieu of the C<--user> option.
+
+=item PGHOST
+
+This variable can be used in lieu of the C<--host> option.
+
+=item PGDATABASE
+
+This variable can be used in lieu of the C<--database> option.
+
+=item PGPORT
+
+This variable can be used in lieu of the C<--port> option.
+
+=item PGPASSWORD
+
+This variable can be used in lieu of the C<--password> option.  It is
+recommended that you B<NOT> use this variable.  It poses a security
+risk.  You should set passwords in a .pgpass file instead.
+
+=back
+
+=head1 TODO
+
+Logging could be done through L<Sys::Syslog>.
+
+More settings or command line options could be moved to the
+configuration file.
+
+=head1 COPYRIGHT
+
+B<extract4summon> is Copyright (C) 2021, 2022 by CW MARS, INC.
+
+=head1 AUTHOR
+
+Jason Stephenson L<jstephenson@cwmars.org|mailto:jstephenson@cwmars.org>
+
+=head1 LICENSE
+
+B<extract4summon> is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License as
+published by the Free Software Foundation; either version 2 of the
+License, or (at your option) any later version.
+
+B<extract4summon> is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+General Public License for more details.
+
+=head1 SEE ALSO
+
+L<YAML::Tiny> - for configuration file format
+L<PostgreSQL Environment Variables|https://www.postgresql.org/docs/current/libpq-envars.html>
+
+=cut
+
+# DBI options with defaults:
+my $db_user = $ENV{PGUSER} || 'evergreen';
+my $db_host = $ENV{PGHOST} || 'db2';
+my $db_database = $ENV{PGDATABASE} || 'evergreen';
+my $db_password = $ENV{PGPASSWORD} || 'evergreen';
+my $db_port = $ENV{PGPORT} || 5432;
+my $logfile = "summon.log";
+# Other variables for CLI options:
+my $config;
+my $full;
+my $org;
+my $since;
+my $noupload;
+
+# Main query used for full updates and basis of daily updates and
+# deletes queries.
+my $main_sql = <<'EOMAIN';
+SELECT distinct acn.record
+FROM asset.call_number acn
+JOIN asset.copy acp
+ON acn.id = acp.call_number
+WHERE acp.circ_lib = ANY($1)
+AND acp.deleted = 'f'
+AND acn.record > 0
+EOMAIN
+
+# Daily updates query is the above, plus an additional condition
+my $updates_sql = $main_sql .
+    "AND (acp.create_date > NOW() - '24 hours'::INTERVAL OR acp.active_date > NOW() - '24 hours'::INTERVAL)";
+
+# Deletes query is more complicated.
+my $deletes_sql = <<EODELETES;
+WITH has_copies AS (
+${main_sql})
+SELECT distinct acn.record
+FROM asset.call_number acn
+JOIN asset.copy acp
+ON acn.id = acp.call_number
+JOIN auditor.asset_copy_history ach
+ON ach.id = acp.id
+WHERE acp.circ_lib = ANY(\$1)
+AND acp.deleted = 't'
+AND ach.deleted = 'f'
+AND ach.audit_time > NOW() - '24 hours'::INTERVAL
+AND acn.record > 0
+AND acn.record NOT IN (SELECT record FROM has_copies)
+EODELETES
+
+GetOptions('user|U=s' => \$db_user,
+           'host|h=s' => \$db_host,
+           'database|d=s' => \$db_database,
+           'password|P=s' => \$db_password,
+           'port|p=i' => \$db_port,
+           'configuration|c=s' => \$config,
+           'logfile|l=s' => \$logfile,
+           'organization|o=s' => \$org,
+           'full|f' => \$full,
+           'since|s=s' => \$since,
+           'dry-run|n' => \$noupload)
+    or die('Error in command line arguments');
+
+unless (defined($config)) {
+    die "Must specify --configuration(-c) option value";
+} else {
+    $config = YAML::Tiny->read($config);
+}
+
+if ($full && $since) {
+    die "The --full and --since options are mutually exclusive";
+} elsif (!$full && !$since) {
+    $full = check_full_update();
+}
+
+# Globals for logging.
+my $log = IO::File->new(">> $logfile");
+
+# TODO: At some point, we need to validate that the $since option's
+# paramter value is a valid ISO date string that can be understood by
+# PostgreSQL.  This would be a good spot to do it.
+
+my $dbh = DBI->connect("dbi:Pg:database=$db_database;host=$db_host;port=$db_port",
+                       $db_user, $db_password,{AutoCommit=>1}) or die('No database connection');
+
+# Prepare a statement handle to retrieve MARC records:
+my $marc_handle = $dbh->prepare('SELECT marc FROM biblio.record_entry WHERE id = ?');
+
+# Use these to build a lookup table of copy locations per MARC record.
+# This is faster than looking them up one record at a time.
+my $location_map = {};
+my $location_handle = $dbh->prepare(<<'EOH'
+SELECT call_number.record, ARRAY_AGG(org_unit.name) AS "branch", ARRAY_AGG(copy_location.name) AS "location",
+ARRAY_AGG(call_number.label) AS "call", ARRAY_AGG(COALESCE(call_number_prefix.label, '')) AS "prefix",
+ARRAY_AGG(COALESCE(call_number_suffix.label, '')) AS "suffix"
+FROM asset.copy
+JOIN actor.org_unit ON org_unit.id = copy.circ_lib
+JOIN asset.copy_location on copy_location.id = copy.location
+JOIN asset.call_number on call_number.id = copy.call_number
+LEFT JOIN asset.call_number_prefix ON call_number_prefix.id = call_number.prefix
+LEFT JOIN asset.call_number_suffix ON call_number_suffix.id = call_number.suffix
+WHERE copy.circ_lib = ANY($2)
+AND call_number.record = ANY($1)
+AND copy.deleted = FALSE
+GROUP BY call_number.record;
+EOH
+);
+
+foreach my $entry (@{$config}) {
+    next if ($org && $entry->{organization} ne $org);
+
+    my $query = ($full) ? $main_sql : $updates_sql;
+    $log->log_msg("Begin", ($full) ? "full" : "daily", "extract for", $entry->{organization});
+    if ($since) {
+        $log->log_msg("Doing extract since", $since);
+        $query = $main_sql .
+            "AND (acp.create_date BETWEEN \$2 AND NOW() OR acp.active_date BETWEEN \$2 AND NOW())";
+    }
+    my @records = get_records($query, $entry->{orgs}, $since);
+
+    if (@records) {
+        @records = sort {$a <=> $b} @records;
+        $location_map = get_location_map(\@records, $entry->{orgs});
+        my $filename = get_filename($entry->{sourceid}, ($full) ? "full" : "updates");
+        dump_marc_records($filename, \@records, $entry);
+        $log->log_msg("Extracted", scalar(@records), "records to", $filename);
+        unless ($noupload) {
+            if (upload_file($filename, $entry->{FTP})) {
+                $log->log_msg("Uploaded",$filename);
+                unlink($filename);
+            } else {
+                $log->log_msg("Failed to upload",$filename);
+                # So we get something in an email
+                warn("Upload of file " . $filename . " failed");
+            }
+        } else {
+            warn("Dry run: $filename not uploaded");
+        }
+    }
+    undef($location_map); # We don't use if for deletes.
+
+    # Add a file of deletes unless we're doing a full update.
+    unless ($full) {
+        if ($since) {
+            $deletes_sql =~ s/> NOW\(\) - '24 hours'::INTERVAL/BETWEEN \$2 AND NOW()/;
+        }
+        @records = get_records($deletes_sql, $entry->{orgs}, $since);
+        if (@records) {
+            @records = sort {$a <=> $b} @records;
+            my $filename = get_filename($entry->{sourceid}, "deletes");
+            dump_marc_records($filename, \@records);
+            $log->log_msg("Extracted", scalar(@records), "records to", $filename);
+            unless ($noupload) {
+                if (upload_file($filename, $entry->{FTP})) {
+                    $log->log_msg("Uploaded",$filename);
+                    unlink($filename);
+                } else {
+                    $log->log_msg("Failed to upload",$filename);
+                    # So we get something in an email
+                    warn("Upload of file " . $filename . " failed");
+                }
+            } else {
+                warn("Dry run: $filename not uploaded");
+            }
+        }
+    }
+    $log->log_msg("End", ($full) ? "full" : "daily", "extract for", $entry->{organization});
+}
+
+END {
+    if ($dbh) {
+        $dbh->disconnect();
+    }
+    $log->close();
+};
+
+# Retrieve a list of biblio.record_entry ids using the global database
+# handle ($dbh), a SQL query ($query), and an arraryref of org. unit
+# ids ($array_arg), where the orgs have holdings on the records to be
+# dumped and the query expects an array of org. units as its sole
+# parameter.
+sub get_records {
+    my $query = shift;
+    my $array_arg = shift;
+    my $since_arg = shift;
+    my $sth = $dbh->prepare($query);
+    if ($sth->bind_param(1, $array_arg, {pg_type => PG_INT8ARRAY})) {
+        if ($since_arg) {
+            return undef unless ($sth->bind_param(2, $since_arg));
+        }
+        if ($sth->execute()) {
+            return map {@$_} @{$sth->fetchall_arrayref([0])};
+        }
+    }
+    return undef;
+}
+
+# Retrieve a MARC::Record from the database using the global prepared
+# statement handle ($marc_handle), a biblio.record_entry id ($bre), a
+# boolean flag ($delete) to indicate if the record should be set to
+# deleted (true) or not (false), and the configuration entry for the
+# current library in order to get the copy locations and LoC code to
+# add to the marc records.
+sub get_marc {
+    my $bre = shift;
+    my $delete = shift;
+    my $entry = shift;
+    if ($marc_handle->execute(($bre))) {
+        my $row = $marc_handle->fetchrow_arrayref();
+        my $marc = MARC::Record->new_from_xml($row->[0]);
+        $marc_handle->finish();
+        if ($delete) {
+            my $leader = $marc->leader();
+            substr($leader, 5, 1) = 'd';
+            $marc->leader($leader);
+        } else {
+            my @fields = $marc->field('852');
+            $marc->delete_fields(@fields);
+            @fields = ();
+            my $row = $location_map->{"$bre"};
+            if ($row) {
+                for (my $i = 0; $i < scalar(@{$row->{branch}}); $i++ ) {
+                    my $field = MARC::Field->new('852', '4', ' ',
+                                                 'a' => $entry->{'loc-code'},
+                                                 'b' => $row->{branch}->[$i],
+                                                 'c' => $row->{location}->[$i],
+                                                 'j' => $row->{call}->[$i]
+                                             );
+                    if ($row->{prefix}->[$i]) {
+                        $field->add_subfields('k', $row->{prefix}->[$i]);
+                    }
+                    if ($row->{suffix}->[$i]) {
+                        $field->add_subfields('m', $row->{suffix}->[$i]);
+                    }
+                    push(@fields, $field);
+                }
+            }
+            $marc->insert_fields_ordered(@fields) if (@fields);
+        }
+        return $marc;
+    }
+    return undef;
+}
+
+# Dump the marc from the record to a file.
+sub dump_marc_records {
+    my $filename = shift;
+    my $records = shift;
+    my $entry = shift;
+    my $delete = ($filename =~ /deletes/) ? 1 : 0;
+    my $fh = IO::File->new($filename, "w");
+    if ($fh) {
+        $fh->binmode(':utf8');
+        foreach my $recid (@{$records}) {
+            my $marc = get_marc($recid, $delete, $entry);
+            print $fh $marc->as_usmarc();
+        }
+        $fh->close();
+    }
+}
+
+# Return a hashref, keyed on record id that points to an arrayref of
+# branches and copy locations.
+sub get_location_map {
+    my $records = shift;
+    my $orgs = shift;
+    $location_handle->bind_param(1, $records, {pg_type => PG_INT8ARRAY});
+    $location_handle->bind_param(2, $orgs, {pg_type => PG_INT8ARRAY});
+    if ($location_handle->execute()) {
+        return $location_handle->fetchall_hashref('record');
+    }
+    return undef;
+}
+
+# A full dump is done quarterly, or when the --full option is used.
+# This function determines if the date is the first of January, April,
+# July, or October to indicate that a full export is required.  It
+# returns 1 if so, 0 if not.
+sub check_full_update {
+    my @tm = localtime;
+    if ($tm[3] == 1 && ($tm[4] % 3) == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+# Given the sourceid from the configuration and the type of the update
+# file (full,updates, or deletes), return the output filename as
+# required for Summon.
+sub get_filename {
+    my $sourceid = shift;
+    my $type = shift;
+    my $date = strftime("%F-%H-%M-%S", localtime());
+    return sprintf("%s-catalog-%s-%s.mrc", $sourceid, $type, $date);
+}
+
+sub upload_file {
+    my $filename = shift;
+    my $ftp = shift;
+    my $wd = "updates";
+    if ($filename =~ /full/) {
+        $wd = "full";
+    } elsif ($filename =~ /deletes/) {
+        $wd = "deletes";
+    }
+    my $sftp = Net::SFTP::Foreign->new(%{$ftp});
+    if ($sftp->error) {
+        $log->log_msg($sftp->error);
+        return 0;
+    }
+    if (!$sftp->setcwd($wd)) {
+        $log->log_msg($sftp->error);
+        return 0;
+    }
+    if (!$sftp->put($filename, $filename)) {
+        $log->log_msg($sftp->error);
+        return 0;
+    }
+    return 1;
+}
+
+# A cheap Perl trick to add a method to IO::Handle so that we can use
+# an OO interface to the log file handle.
+package IO::Handle;
+sub log_msg{
+    my $fh = shift;
+    unshift(@_, POSIX::strftime("%F %T", localtime()));
+    return $fh->printflush("@_\n");
+}
+1;

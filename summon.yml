@@ -1,0 +1,12 @@
+%YAML 1.1
+---
+organization: SYS1
+orgs:
+  - 4
+  - 5
+sourceid: sys1
+loc-code: ChangeMe
+FTP:
+  host: ftp.summon.serialssolutions.com
+  user: sys1-catalog
+  password: ChangeMe
