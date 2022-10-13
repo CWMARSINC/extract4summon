@@ -58,6 +58,7 @@ server.
 
 - DBI
 - DBD::Pg
+- IO::Pty
 - MARC::Record
 - MARC::File::XML
 - Net::SFTP::Foreign
