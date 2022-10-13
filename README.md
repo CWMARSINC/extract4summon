@@ -160,7 +160,7 @@ are described below.
     up.  If you are in a country other than the United States of America,
     you will need to get this code from your nation's responsible agency.
 
-- item output-dir
+- output-dir
 
     Directory where the output file will be written.  It must be readable
     and writable by the user running the summon process.  If not set, the
