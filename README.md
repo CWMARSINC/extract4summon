@@ -160,7 +160,16 @@ are described below.
     up.  If you are in a country other than the United States of America,
     you will need to get this code from your nation's responsible agency.
 
-- FTP
+- item output-dir
+
+    Directory where the output file will be written.  It must be readable
+    and writable by the user running the summon process.  If not set, the
+    current directory is used.
+
+    By default this setting is not present in the configuration and must
+    be added in order to be used.
+
+ - FTP
 
     A set of key/value pairs used to configure the file upload.  Its keys
     and values are described below.

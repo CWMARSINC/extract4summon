@@ -25,6 +25,7 @@ use YAML::Tiny;
 use IO::File;
 use POSIX qw(strftime);
 use Net::SFTP::Foreign;
+use File::Basename;
 
 =head1 NAME
 
@@ -197,6 +198,15 @@ Congress.  The Library of Congress has L<an online
 tool|https://www.loc.gov/marc/organizations/org-search.php> to look it
 up.  If you are in a country other than the United States of America,
 you will need to get this code from your nation's responsible agency.
+
+=item output-dir
+
+Directory where the output file will be written.  It must be readable
+and writable by the user running the summon process.  If not set, the
+current directory is used.
+
+By default this setting is not present in the configuration and must
+be added.
 
 =item FTP
 
@@ -415,7 +425,7 @@ foreach my $entry (@{$config}) {
     if (@records) {
         @records = sort {$a <=> $b} @records;
         $location_map = get_location_map(\@records, $entry->{orgs});
-        my $filename = get_filename($entry->{sourceid}, ($full) ? "full" : "updates");
+        my $filename = get_filename($entry->{sourceid}, ($full) ? "full" : "updates", $entry->{'output-dir'});
         dump_marc_records($filename, \@records, $entry);
         $log->log_msg("Extracted", scalar(@records), "records to", $filename);
         unless ($noupload) {
@@ -441,7 +451,7 @@ foreach my $entry (@{$config}) {
         @records = get_records($deletes_sql, $entry->{orgs}, $since);
         if (@records) {
             @records = sort {$a <=> $b} @records;
-            my $filename = get_filename($entry->{sourceid}, "deletes");
+            my $filename = get_filename($entry->{sourceid}, "deletes", $entry->{'output-dir'});
             dump_marc_records($filename, \@records);
             $log->log_msg("Extracted", scalar(@records), "records to", $filename);
             unless ($noupload) {
@@ -584,8 +594,14 @@ sub check_full_update {
 sub get_filename {
     my $sourceid = shift;
     my $type = shift;
+    my $directory = shift;
     my $date = strftime("%F-%H-%M-%S", localtime());
-    return sprintf("%s-catalog-%s-%s.mrc", $sourceid, $type, $date);
+    my $file = sprintf("%s-catalog-%s-%s.mrc", $sourceid, $type, $date);
+    if ($directory) {
+        $directory .= '/' unless ($directory =~ m|/$|);
+        $file = $directory . $file;
+    }
+    return $file;
 }
 
 sub upload_file {
@@ -606,7 +622,7 @@ sub upload_file {
         $log->log_msg($sftp->error);
         return 0;
     }
-    if (!$sftp->put($filename, $filename)) {
+    if (!$sftp->put($filename, basename($filename))) {
         $log->log_msg($sftp->error);
         return 0;
     }
