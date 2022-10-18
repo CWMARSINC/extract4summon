@@ -7,12 +7,13 @@ to run ready-only queries.
 
 In order to install and use **extract4summon**, you must perform the following steps:
 
-- 1. Install the modules listed in the [PREREQUISITES](#prerequisites).
-- 2. Clone the git repository:
+ 1. Install the modules listed in the [PREREQUISITES](#prerequisites).
+
+ 2. Clone the git repository:
 
     `git clone https://gitlab.cwmars.org/jstephenson/extract4summon.git`
 
-- 3. Edit the sample configuration file [summon.yml](summon.yml).
+ 3. Edit the sample configuration file [summon.yml](summon.yml).
 
     The sample configuration contains dummy values for the Sys1 system
     from the sample Evergreen data.  It also has "ChangeMe" placeholders
